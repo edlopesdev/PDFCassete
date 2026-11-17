@@ -1,0 +1,9 @@
+<resources>
+    <string name="app_name">PDF CASSETE</string>
+    <string name="reading_notification_channel_name">Leitura em áudio</string>
+    <string name="reading_notification_text">Leitura em andamento</string>
+    <string name="previous_action">Trecho anterior</string>
+    <string name="play_action">Reproduzir</string>
+    <string name="pause_action">Pausar</string>
+    <string name="next_action">Próximo trecho</string>
+</resources>
