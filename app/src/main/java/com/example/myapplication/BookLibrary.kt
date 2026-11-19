@@ -1,7 +1,10 @@
 package com.example.myapplication
 
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.pdf.PdfRenderer
 import android.net.Uri
+import android.os.ParcelFileDescriptor
 import com.tom_roush.pdfbox.android.PDFBoxResourceLoader
 import com.tom_roush.pdfbox.pdmodel.PDDocument
 import com.tom_roush.pdfbox.text.PDFTextStripper
@@ -12,6 +15,8 @@ import java.io.FileOutputStream
 import java.io.IOException
 import java.nio.charset.StandardCharsets
 import java.util.UUID
+import kotlin.math.min
+import kotlin.math.roundToInt
 
 data class Book(
     val id: String,
@@ -139,7 +144,7 @@ class BookLibrary(context: Context) {
     fun process(book: Book): Book {
         val source = File(File(root, book.id), "source.pdf")
         val textDir = File(root, book.id)
-        PDDocument.load(source).use { document ->
+        val result = PDDocument.load(source).use { document ->
             val metadata = document.documentInformation
             val title = metadata.title?.trim()?.takeIf(String::isNotEmpty) ?: book.title
             val author = metadata.author?.trim().orEmpty()
@@ -156,15 +161,66 @@ class BookLibrary(context: Context) {
                 File(textDir, "page-$page.txt").writeText(pageText, StandardCharsets.UTF_8)
             }
             val hasText = (1..pages).any { pageText(book.id, it).isNotBlank() }
-            val result = book.copy(
+            book.copy(
                 title = title,
                 author = author,
                 pageCount = pages,
                 status = if (hasText) STATUS_READY else STATUS_NO_TEXT,
                 error = ""
             )
-            save(result)
-            return result
+        }
+        renderCover(book.id)
+        save(result)
+        return result
+    }
+
+    fun coverFile(bookId: String): File {
+        val cover = File(File(root, bookId), COVER_FILE_NAME)
+        if (!cover.isFile) renderCover(bookId)
+        return cover
+    }
+
+    private fun renderCover(bookId: String) {
+        val bookDir = File(root, bookId)
+        val source = File(bookDir, "source.pdf")
+        if (!source.isFile) throw IOException("O PDF original não foi encontrado.")
+        val temporary = File(bookDir, "$COVER_FILE_NAME.tmp")
+        val descriptor = ParcelFileDescriptor.open(source, ParcelFileDescriptor.MODE_READ_ONLY)
+        try {
+            val renderer = PdfRenderer(descriptor)
+            try {
+                if (renderer.pageCount == 0) throw IOException("O PDF não contém páginas.")
+                val page = renderer.openPage(0)
+                try {
+                    val scale = min(640f / page.width, 900f / page.height)
+                    val bitmap = Bitmap.createBitmap(
+                        (page.width * scale).roundToInt().coerceAtLeast(1),
+                        (page.height * scale).roundToInt().coerceAtLeast(1),
+                        Bitmap.Config.ARGB_8888
+                    )
+                    page.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                    FileOutputStream(temporary).use { output ->
+                        if (!bitmap.compress(Bitmap.CompressFormat.PNG, 100, output)) {
+                            throw IOException("Não foi possível salvar a capa do PDF.")
+                        }
+                    }
+                    bitmap.recycle()
+                } finally {
+                    page.close()
+                }
+            } finally {
+                renderer.close()
+            }
+        } catch (error: Exception) {
+            temporary.delete()
+            throw error
+        } finally {
+            descriptor.close()
+        }
+        val cover = File(bookDir, COVER_FILE_NAME)
+        if (!temporary.renameTo(cover)) {
+            temporary.delete()
+            throw IOException("Não foi possível preparar a capa do PDF.")
         }
     }
 
@@ -246,6 +302,7 @@ class BookLibrary(context: Context) {
     companion object {
         const val MAX_FILE_BYTES = 100L * 1024 * 1024
         private const val KEY_BOOKS = "books"
+        private const val COVER_FILE_NAME = "cover.png"
         private val PDF_HEADER = "%PDF-".toByteArray(StandardCharsets.US_ASCII)
     }
 }

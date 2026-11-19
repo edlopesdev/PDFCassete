@@ -23,6 +23,10 @@ class AudioPlaybackService : Service() {
     override fun onCreate() {
         super.onCreate()
         mediaSession = MediaSessionCompat(this, "PDF Cassette").apply {
+            setFlags(
+                MediaSessionCompat.FLAG_HANDLES_MEDIA_BUTTONS or
+                    MediaSessionCompat.FLAG_HANDLES_TRANSPORT_CONTROLS
+            )
             setCallback(object : MediaSessionCompat.Callback() {
                 override fun onPlay() = sendPlaybackCommand(ACTION_PLAY)
                 override fun onPause() = sendPlaybackCommand(ACTION_PAUSE)

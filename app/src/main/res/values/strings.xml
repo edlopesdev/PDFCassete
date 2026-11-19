@@ -6,4 +6,22 @@
     <string name="play_action">Reproduzir</string>
     <string name="pause_action">Pausar</string>
     <string name="next_action">Próximo trecho</string>
+    <string name="settings_title">Cores do aplicativo</string>
+    <string name="settings_back">Voltar</string>
+    <string name="settings_accent">Detalhes, barras e botões</string>
+    <string name="settings_background">Fundo</string>
+    <string name="settings_text">Texto</string>
+    <string name="color_orange">Laranja</string>
+    <string name="color_blue">Azul</string>
+    <string name="color_green">Verde</string>
+    <string name="color_purple">Roxo</string>
+    <string name="color_red">Vermelho</string>
+    <string name="background_default">Padrão</string>
+    <string name="background_black">Preto</string>
+    <string name="background_warm">Quente</string>
+    <string name="background_light">Claro</string>
+    <string name="text_default">Padrão</string>
+    <string name="text_white">Branco</string>
+    <string name="text_gray">Cinza</string>
+    <string name="text_black">Preto</string>
 </resources>

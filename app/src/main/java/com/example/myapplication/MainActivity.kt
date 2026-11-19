@@ -1,8 +1,10 @@
 package com.example.myapplication
 
 import android.net.Uri
+import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.graphics.BitmapFactory
 import android.os.Bundle
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
@@ -13,6 +15,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -58,8 +61,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -75,10 +82,18 @@ import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.sin
 
+private const val KEY_LAST_BOOK_ID = "last_book_id"
+
 private data class PreparedPage(
     val bookId: String,
     val page: Int,
     val paragraphs: List<String>
+)
+
+private data class AppColors(
+    val accent: Color,
+    val background: Color,
+    val text: Color
 )
 
 class MainActivity : ComponentActivity() {
@@ -136,10 +151,41 @@ class MainActivity : ComponentActivity() {
             }
         })
 
+        val settings = getSharedPreferences("cassette_settings", MODE_PRIVATE)
         setContent {
-            MyApplicationTheme(darkTheme = true) {
+            var accentArgb by remember {
+                mutableIntStateOf(settings.getInt(KEY_ACCENT_COLOR, DEFAULT_ACCENT_COLOR))
+            }
+            var backgroundArgb by remember {
+                mutableIntStateOf(settings.getInt(KEY_BACKGROUND_COLOR, DEFAULT_BACKGROUND_COLOR))
+            }
+            var textArgb by remember {
+                mutableIntStateOf(settings.getInt(KEY_TEXT_COLOR, DEFAULT_TEXT_COLOR))
+            }
+            val appColors = AppColors(
+                accent = Color(accentArgb),
+                background = Color(backgroundArgb),
+                text = Color(textArgb)
+            )
+            MyApplicationTheme(
+                darkTheme = true,
+                accentColor = appColors.accent,
+                backgroundColor = appColors.background,
+                textColor = appColors.text
+            ) {
                 CassetteReadApp(
                     library = remember { BookLibrary(this) },
+                    appColors = appColors,
+                    onColorsChanged = { colors ->
+                        accentArgb = colors.accent.toArgb()
+                        backgroundArgb = colors.background.toArgb()
+                        textArgb = colors.text.toArgb()
+                        settings.edit()
+                            .putInt(KEY_ACCENT_COLOR, accentArgb)
+                            .putInt(KEY_BACKGROUND_COLOR, backgroundArgb)
+                            .putInt(KEY_TEXT_COLOR, textArgb)
+                            .apply()
+                    },
                     speech = speech,
                     ttsReady = ready,
                     voices = voices,
@@ -178,11 +224,22 @@ class MainActivity : ComponentActivity() {
         }
         super.onDestroy()
     }
+
+    companion object {
+        private const val KEY_ACCENT_COLOR = "accent_color"
+        private const val KEY_BACKGROUND_COLOR = "background_color"
+        private const val KEY_TEXT_COLOR = "text_color"
+        private val DEFAULT_ACCENT_COLOR = Color(0xFFFF9A56).toArgb()
+        private val DEFAULT_BACKGROUND_COLOR = Color(0xFF101111).toArgb()
+        private val DEFAULT_TEXT_COLOR = Color(0xFFF3F0EA).toArgb()
+    }
 }
 
 @Composable
 private fun CassetteReadApp(
     library: BookLibrary,
+    appColors: AppColors,
+    onColorsChanged: (AppColors) -> Unit,
     speech: TextToSpeech,
     ttsReady: Boolean,
     voices: List<Voice>,
@@ -194,12 +251,25 @@ private fun CassetteReadApp(
     stopPlaybackService: () -> Unit,
     setPlaybackCommandListener: ((String) -> Unit) -> Unit
 ) {
+    val context = LocalContext.current
+    val preferences = remember(context) {
+        context.getSharedPreferences("cassette_settings", Context.MODE_PRIVATE)
+    }
     var books by remember { mutableStateOf(library.all()) }
-    var selectedId by remember { mutableStateOf(books.firstOrNull()?.id) }
+    var selectedId by remember {
+        val savedId = preferences.getString(KEY_LAST_BOOK_ID, null)
+        mutableStateOf(
+            books.firstOrNull { it.id == savedId }?.id
+                ?: books.maxByOrNull { it.lastPlayedAt }
+                    ?.takeIf { it.lastPlayedAt > 0L }
+                    ?.id
+                ?: books.firstOrNull()?.id
+        )
+    }
     val selectedBook = books.firstOrNull { it.id == selectedId }
     var showLibrary by remember { mutableStateOf(false) }
+    var showSettings by remember { mutableStateOf(false) }
     var showLog by remember { mutableStateOf(false) }
-    val context = LocalContext.current
     val logContent = remember(context) {
         context.assets.open("log.txt").bufferedReader().use { it.readText() }
     }
@@ -234,6 +304,13 @@ private fun CassetteReadApp(
     fun refresh(updated: Book? = null) {
         if (updated != null) library.update(updated)
         books = library.all()
+    }
+
+    fun rememberBook(bookId: String?) {
+        preferences.edit().apply {
+            if (bookId == null) remove(KEY_LAST_BOOK_ID)
+            else putString(KEY_LAST_BOOK_ID, bookId)
+        }.apply()
     }
 
     fun saveProgress(page: Int = currentPage, paragraph: Int = currentParagraph) {
@@ -275,6 +352,7 @@ private fun CassetteReadApp(
 
     fun speakText(text: String, page: Int, paragraph: Int) {
         val book = books.firstOrNull { it.id == selectedId } ?: return
+        rememberBook(book.id)
         currentPage = page
         currentParagraph = paragraph
         isPlaying = true
@@ -532,7 +610,10 @@ private fun CassetteReadApp(
                         val book = withContext(Dispatchers.IO) { library.importPdf(uri) }
                         added = book
                         books = library.all()
-                        if (selectedId == null) selectedId = book.id
+                        if (selectedId == null) {
+                            selectedId = book.id
+                            rememberBook(book.id)
+                        }
                         val processed = withContext(Dispatchers.IO) { library.process(book) }
                         books = library.all()
                         if (processed.status == STATUS_NO_TEXT) {
@@ -553,7 +634,7 @@ private fun CassetteReadApp(
 
     Surface(
         modifier = Modifier.fillMaxSize(),
-        color = Color(0xFF101111)
+        color = MaterialTheme.colorScheme.background
     ) {
         Box(modifier = Modifier.fillMaxSize()) {
             Column(
@@ -565,14 +646,29 @@ private fun CassetteReadApp(
             ) {
             Header(
                 showLibrary = showLibrary,
+                showSettings = showSettings,
                 bookCount = books.size,
-                onLibrary = { showLibrary = !showLibrary },
+                onLibrary = {
+                    showLibrary = !showLibrary
+                    showSettings = false
+                },
+                onSettings = {
+                    showSettings = !showSettings
+                    showLibrary = false
+                },
                 onImport = { importLauncher.launch(arrayOf("application/pdf")) }
             )
             Spacer(Modifier.height(20.dp))
 
-            if (showLibrary) {
+            if (showSettings) {
+                SettingsScreen(
+                    colors = appColors,
+                    onColorsChanged = onColorsChanged,
+                    onBack = { showSettings = false }
+                )
+            } else if (showLibrary) {
                 LibraryScreen(
+                    library = library,
                     books = books,
                     selectedId = selectedId,
                     search = search,
@@ -587,6 +683,8 @@ private fun CassetteReadApp(
                             currentParagraph = book.currentParagraph.coerceAtLeast(0)
                             rate = book.speechRate
                         }
+                        rememberBook(book.id)
+                        refresh(book.copy(lastPlayedAt = System.currentTimeMillis()))
                         showLibrary = false
                     },
                     onRename = { book ->
@@ -597,6 +695,7 @@ private fun CassetteReadApp(
                         if (selectedId == book.id) {
                             stopPlayback()
                             selectedId = books.firstOrNull { it.id != book.id }?.id
+                            rememberBook(selectedId)
                         }
                         library.delete(book)
                         books = library.all()
@@ -674,7 +773,7 @@ private fun CassetteReadApp(
                     Spacer(Modifier.height(12.dp))
                     Text(
                         text = message,
-                        color = Color(0xFFFFB273),
+                        color = MaterialTheme.colorScheme.primary,
                         style = MaterialTheme.typography.bodyMedium
                     )
                 }
@@ -695,8 +794,8 @@ private fun CassetteReadApp(
                             showLog = true
                         },
                     shape = CircleShape,
-                    color = Color(0xFFFF9A56),
-                    contentColor = Color(0xFF21160F)
+                    color = MaterialTheme.colorScheme.primary,
+                    contentColor = MaterialTheme.colorScheme.onPrimary
                 ) {
                     Box(contentAlignment = Alignment.Center) {
                         Text("i", fontSize = 20.sp, fontWeight = FontWeight.Bold)
@@ -726,7 +825,7 @@ private fun CassetteReadApp(
             if (showLog) {
                 Surface(
                     modifier = Modifier.fillMaxSize(),
-                    color = Color(0xFF101111)
+                    color = MaterialTheme.colorScheme.background
                 ) {
                     Column(
                         modifier = Modifier
@@ -842,28 +941,163 @@ private fun CassetteReadApp(
 @Composable
 private fun Header(
     showLibrary: Boolean,
+    showSettings: Boolean,
     bookCount: Int,
     onLibrary: () -> Unit,
+    onSettings: () -> Unit,
     onImport: () -> Unit
 ) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.SpaceBetween
-    ) {
-        Column {
-            Text("PDF CASSETE", color = Color(0xFFFF9A56), fontSize = 12.sp, fontWeight = FontWeight.Bold)
-            Text("Seu acervo, em voz alta", color = Color(0xFFF3F0EA), fontSize = 19.sp, fontWeight = FontWeight.SemiBold)
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedButton(onClick = onLibrary) {
-                Text(if (showLibrary) "Player" else "Biblioteca ($bookCount)")
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    "PDF CASSETE",
+                    color = MaterialTheme.colorScheme.primary,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold
+                )
+                Text(
+                    "Seu acervo, em voz alta",
+                    color = MaterialTheme.colorScheme.onBackground,
+                    fontSize = 19.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
             }
             Button(
                 onClick = onImport,
-                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFF9A56))
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.primary
+                )
             ) {
-                Text("+ PDF", color = Color(0xFF21160F))
+                Text("+ PDF", color = MaterialTheme.colorScheme.onPrimary)
+            }
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.End
+        ) {
+            OutlinedButton(onClick = onLibrary) {
+                Text(if (showLibrary) "Player" else "Biblioteca ($bookCount)")
+            }
+            Spacer(Modifier.width(8.dp))
+            OutlinedButton(onClick = onSettings) {
+                Text(if (showSettings) "Voltar" else "Cores")
+            }
+        }
+    }
+}
+
+private data class ColorChoice(val label: String, val color: Color)
+
+@Composable
+private fun SettingsScreen(
+    colors: AppColors,
+    onColorsChanged: (AppColors) -> Unit,
+    onBack: () -> Unit
+) {
+    val accentOptions = listOf(
+        ColorChoice(stringResource(R.string.color_orange), Color(0xFFFF9A56)),
+        ColorChoice(stringResource(R.string.color_blue), Color(0xFF64B5F6)),
+        ColorChoice(stringResource(R.string.color_green), Color(0xFF80CBC4)),
+        ColorChoice(stringResource(R.string.color_purple), Color(0xFFCE93D8)),
+        ColorChoice(stringResource(R.string.color_red), Color(0xFFEF9A9A))
+    )
+    val backgroundOptions = listOf(
+        ColorChoice(stringResource(R.string.background_default), Color(0xFF101111)),
+        ColorChoice(stringResource(R.string.background_black), Color(0xFF000000)),
+        ColorChoice(stringResource(R.string.background_warm), Color(0xFF25221E)),
+        ColorChoice(stringResource(R.string.background_light), Color(0xFFF1F1F1))
+    )
+    val textOptions = listOf(
+        ColorChoice(stringResource(R.string.text_default), Color(0xFFF3F0EA)),
+        ColorChoice(stringResource(R.string.text_white), Color(0xFFFFFFFF)),
+        ColorChoice(stringResource(R.string.text_gray), Color(0xFFBDBDBD)),
+        ColorChoice(stringResource(R.string.text_black), Color(0xFF171717))
+    )
+
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(16.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                stringResource(R.string.settings_title),
+                fontSize = 24.sp,
+                fontWeight = FontWeight.SemiBold
+            )
+            TextButton(onClick = onBack) { Text(stringResource(R.string.settings_back)) }
+        }
+        ColorSettingsRow(
+            label = stringResource(R.string.settings_accent),
+            options = accentOptions,
+            selected = colors.accent,
+            onSelect = { onColorsChanged(colors.copy(accent = it)) }
+        )
+        ColorSettingsRow(
+            label = stringResource(R.string.settings_background),
+            options = backgroundOptions,
+            selected = colors.background,
+            onSelect = { onColorsChanged(colors.copy(background = it)) }
+        )
+        ColorSettingsRow(
+            label = stringResource(R.string.settings_text),
+            options = textOptions,
+            selected = colors.text,
+            onSelect = { onColorsChanged(colors.copy(text = it)) }
+        )
+    }
+}
+
+@Composable
+private fun ColorSettingsRow(
+    label: String,
+    options: List<ColorChoice>,
+    selected: Color,
+    onSelect: (Color) -> Unit
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text(label, fontWeight = FontWeight.SemiBold)
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            options.forEach { option ->
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .clickable { onSelect(option.color) },
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Surface(
+                        modifier = Modifier
+                            .size(38.dp)
+                            .border(
+                                width = if (selected == option.color) 3.dp else 1.dp,
+                                color = if (selected == option.color) {
+                                    MaterialTheme.colorScheme.primary
+                                } else {
+                                    MaterialTheme.colorScheme.onSurface.copy(alpha = 0.3f)
+                                },
+                                shape = CircleShape
+                            ),
+                        shape = CircleShape,
+                        color = option.color
+                    ) {}
+                    Text(
+                        option.label,
+                        fontSize = 10.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
             }
         }
     }
@@ -872,7 +1106,7 @@ private fun Header(
 @Composable
 private fun EmptyLibrary(onImport: () -> Unit) {
     Card(
-        colors = CardDefaults.cardColors(containerColor = Color(0xFF191B1A)),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
         shape = RoundedCornerShape(24.dp),
         modifier = Modifier.fillMaxWidth()
     ) {
@@ -927,7 +1161,7 @@ private fun PlayerScreen(
                 STATUS_ERROR -> "FALHA NO PROCESSAMENTO"
                 else -> if (book.completed) "LEITURA CONCLUÍDA" else "EM REPRODUÇÃO · TEXTO ESTIMADO"
             },
-            color = Color(0xFFB5C9B0),
+            color = MaterialTheme.colorScheme.secondary,
             fontSize = 11.sp,
             fontWeight = FontWeight.Bold,
             letterSpacing = 1.4.sp
@@ -942,7 +1176,7 @@ private fun PlayerScreen(
         )
         Text(
             book.author.ifBlank { book.fileName },
-            color = Color(0xFFAAA9A3),
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.72f),
             fontSize = 14.sp,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis
@@ -957,7 +1191,7 @@ private fun PlayerScreen(
         Spacer(Modifier.height(10.dp))
         Text(
             if (pageCount > 0) "Página ${page + 1} de $pageCount  ·  Trecho ${if (paragraphCount == 0) 0 else currentParagraph + 1}" else book.error,
-            color = Color(0xFFAAA9A3),
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.72f),
             fontSize = 13.sp
         )
         if (pageCount > 1) {
@@ -973,9 +1207,17 @@ private fun PlayerScreen(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text("Progresso estimado pela página", color = Color(0xFF8F918D), fontSize = 11.sp)
+                Text(
+                    "Progresso estimado pela página",
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                    fontSize = 11.sp
+                )
                 val percent = if (book.completed) 100 else if (pageCount > 0) (((seekPage.coerceIn(0f, (pageCount - 1).toFloat()) + 1f) / pageCount.toFloat()) * 100f).toInt().coerceIn(0, 100) else 0
-                Text("$percent%", color = Color(0xFF8F918D), fontSize = 11.sp)
+                Text(
+                    "$percent%",
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                    fontSize = 11.sp
+                )
             }
         }
         Spacer(Modifier.height(14.dp))
@@ -985,7 +1227,7 @@ private fun PlayerScreen(
             verticalAlignment = Alignment.CenterVertically
         ) {
             TextButton(onClick = onPrevious, enabled = book.status == STATUS_READY) {
-                Text("‹ Trecho", color = Color(0xFFF3F0EA))
+                Text("‹ Trecho", color = MaterialTheme.colorScheme.onSurface)
             }
             Spacer(Modifier.width(10.dp))
             Button(
@@ -993,21 +1235,28 @@ private fun PlayerScreen(
                 enabled = book.status == STATUS_READY && !isLoading && ttsReady,
                 modifier = Modifier.size(72.dp),
                 shape = CircleShape,
-                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFF9A56))
+                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
             ) {
-                Text(if (isPlaying) "Ⅱ" else "▶", color = Color(0xFF21160F), fontSize = 24.sp)
+                Text(
+                    if (isPlaying) "Ⅱ" else "▶",
+                    color = MaterialTheme.colorScheme.onPrimary,
+                    fontSize = 24.sp
+                )
             }
             Spacer(Modifier.width(10.dp))
             TextButton(onClick = onNext, enabled = book.status == STATUS_READY) {
-                Text("Trecho ›", color = Color(0xFFF3F0EA))
+                Text("Trecho ›", color = MaterialTheme.colorScheme.onSurface)
             }
         }
         TextButton(onClick = onStop, enabled = book.status == STATUS_READY) {
-            Text("Parar e voltar ao início", color = Color(0xFFAAA9A3))
+            Text(
+                "Parar e voltar ao início",
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.72f)
+            )
         }
         Spacer(Modifier.height(8.dp))
         Card(
-            colors = CardDefaults.cardColors(containerColor = Color(0xFF191B1A)),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
             shape = RoundedCornerShape(18.dp),
             modifier = Modifier.fillMaxWidth()
         ) {
@@ -1061,7 +1310,7 @@ private fun PlayerScreen(
         Spacer(Modifier.height(12.dp))
         Text(
             "As vozes e idiomas exibidos dependem do mecanismo TTS instalado no Android.",
-            color = Color(0xFF8F918D),
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
             fontSize = 11.sp
         )
     }
@@ -1069,6 +1318,7 @@ private fun PlayerScreen(
 
 @Composable
 private fun LibraryScreen(
+    library: BookLibrary,
     books: List<Book>,
     selectedId: String?,
     search: String,
@@ -1106,46 +1356,104 @@ private fun LibraryScreen(
         filtered.forEach { book ->
             Card(
                 colors = CardDefaults.cardColors(
-                    containerColor = if (book.id == selectedId) Color(0xFF242623) else Color(0xFF191B1A)
+                    containerColor = if (book.id == selectedId) {
+                        MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)
+                    } else {
+                        MaterialTheme.colorScheme.surface
+                    }
                 ),
                 shape = RoundedCornerShape(18.dp),
                 modifier = Modifier.fillMaxWidth().padding(vertical = 5.dp)
             ) {
-                Column(Modifier.padding(14.dp)) {
-                    Text(
-                        book.title,
-                        fontWeight = FontWeight.SemiBold,
-                        fontSize = 16.sp,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.clickable { onSelect(book) }
-                    )
-                    Text(
-                        "${book.pageCount} páginas · ${formatBytes(book.sizeBytes)} · ${bookStatus(book)}",
-                        color = Color(0xFFAAA9A3),
-                        fontSize = 12.sp
-                    )
-                    if (book.lastPlayedAt > 0 || book.completed) {
+                Row(
+                    modifier = Modifier.padding(12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    BookCover(book = book, library = library)
+                    Column(modifier = Modifier.weight(1f)) {
                         Text(
-                            if (book.completed) "Concluído" else "Retomar na página ${book.currentPage + 1}",
-                            color = Color(0xFFFFB273),
+                            book.title,
+                            fontWeight = FontWeight.SemiBold,
+                            fontSize = 16.sp,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.clickable { onSelect(book) }
+                        )
+                        Text(
+                            "${book.pageCount} páginas · ${formatBytes(book.sizeBytes)} · ${bookStatus(book)}",
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.72f),
                             fontSize = 12.sp
                         )
-                    }
-                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                        TextButton(onClick = { onSelect(book) }) {
-                            Text(if (book.currentPage > 0) "Continuar ouvindo" else "Abrir")
+                        if (book.lastPlayedAt > 0 || book.completed) {
+                            Text(
+                                if (book.completed) "Concluído" else "Retomar na página ${book.currentPage + 1}",
+                                color = MaterialTheme.colorScheme.primary,
+                                fontSize = 12.sp
+                            )
                         }
-                        if (book.status == STATUS_PENDING || book.status == STATUS_ERROR) {
-                            TextButton(onClick = { onProcess(book) }) { Text("Processar novamente") }
+                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                            TextButton(onClick = { onSelect(book) }) {
+                                Text(if (book.currentPage > 0) "Continuar ouvindo" else "Abrir")
+                            }
+                            if (book.status == STATUS_PENDING || book.status == STATUS_ERROR) {
+                                TextButton(onClick = { onProcess(book) }) { Text("Processar novamente") }
+                            }
+                            TextButton(onClick = { onRename(book) }) { Text("Renomear") }
+                            TextButton(onClick = { onDelete(book) }) { Text("Remover") }
                         }
-                        TextButton(onClick = { onRename(book) }) { Text("Renomear") }
-                        TextButton(onClick = { onDelete(book) }) { Text("Remover") }
-                    }
-                    if (book.status == STATUS_NO_TEXT) {
-                        Text("Pode ser uma digitalização; o reconhecimento OCR não está disponível.", color = Color(0xFFFFB273), fontSize = 12.sp)
+                        if (book.status == STATUS_NO_TEXT) {
+                            Text(
+                                "Pode ser uma digitalização; o reconhecimento OCR não está disponível.",
+                                color = MaterialTheme.colorScheme.primary,
+                                fontSize = 12.sp
+                            )
+                        }
                     }
                 }
+            }
+        }
+    }
+}
+
+@Composable
+private fun BookCover(book: Book, library: BookLibrary) {
+    var bitmap by remember(book.id) {
+        mutableStateOf<androidx.compose.ui.graphics.ImageBitmap?>(null)
+    }
+    var unavailable by remember(book.id) { mutableStateOf(false) }
+    LaunchedEffect(book.id) {
+        try {
+            val loaded = withContext(Dispatchers.IO) {
+                BitmapFactory.decodeFile(library.coverFile(book.id).absolutePath)
+            }
+            if (loaded == null) {
+                unavailable = true
+            } else {
+                bitmap = loaded.asImageBitmap()
+            }
+        } catch (_: Exception) {
+            unavailable = true
+        }
+    }
+    Surface(
+        modifier = Modifier.width(72.dp).height(104.dp),
+        shape = RoundedCornerShape(8.dp),
+        color = MaterialTheme.colorScheme.surface
+    ) {
+        if (bitmap != null) {
+            Image(
+                bitmap = bitmap!!,
+                contentDescription = "Capa de ${book.title}",
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize()
+            )
+        } else {
+            Box(contentAlignment = Alignment.Center) {
+                Text(
+                    if (unavailable) "Capa indisponível" else "PDF",
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+                    fontSize = 10.sp
+                )
             }
         }
     }
@@ -1159,6 +1467,8 @@ private fun CassetteIllustration(
     modifier: Modifier = Modifier
 ) {
     var angle by remember { mutableFloatStateOf(0f) }
+    val accentColor = MaterialTheme.colorScheme.primary
+    val completionColor = MaterialTheme.colorScheme.secondary
     LaunchedEffect(isPlaying) {
         if (isPlaying) {
             var lastFrame = 0L
@@ -1203,7 +1513,7 @@ private fun CassetteIllustration(
             androidx.compose.ui.geometry.Offset(left + cassetteWidth * 0.68f, centerY)
         )
         drawLine(
-            color = Color(0xFFD19A55),
+            color = accentColor,
             start = androidx.compose.ui.geometry.Offset(centers[0].x + radius, centerY),
             end = androidx.compose.ui.geometry.Offset(centers[1].x - radius, centerY),
             strokeWidth = 5f
@@ -1230,15 +1540,15 @@ private fun CassetteIllustration(
             }
         }
         drawRoundRect(
-            color = if (isPlaying) Color(0xFFFF9A56) else Color(0xFF85877F),
+            color = if (isPlaying) accentColor else Color(0xFF85877F),
             topLeft = androidx.compose.ui.geometry.Offset(left + cassetteWidth * 0.28f, top + cassetteHeight * 0.76f),
             size = androidx.compose.ui.geometry.Size(cassetteWidth * 0.44f, cassetteHeight * 0.055f),
             cornerRadius = androidx.compose.ui.geometry.CornerRadius(5f)
         )
         if (isLoading) {
-            drawCircle(Color(0xFFFF9A56), radius = 5f, center = androidx.compose.ui.geometry.Offset(w / 2, h * 0.88f))
+            drawCircle(accentColor, radius = 5f, center = androidx.compose.ui.geometry.Offset(w / 2, h * 0.88f))
         } else if (completed) {
-            drawCircle(Color(0xFFB5C9B0), radius = 5f, center = androidx.compose.ui.geometry.Offset(w / 2, h * 0.88f))
+            drawCircle(completionColor, radius = 5f, center = androidx.compose.ui.geometry.Offset(w / 2, h * 0.88f))
         }
     }
 }
