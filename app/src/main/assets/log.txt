@@ -1,1 +1,20 @@
-log teste
+========================================
+
+1. Novo Ícone do Aplicativo
+2. Correção da Reprodução em Segundo Plano (Tela Apagada/Bloqueada)
+3. Cores adicionadas (Personalização)
+
+========================================
+
+
+Saudações!
+
+Esse projeto é feito por uma pessoa só
+e disponibilizado gratuitamente.
+
+Se puder, doe para ajudar a mantê-lo.
+
+pix: edlopesdev@gmail.com
+
+
+========================================

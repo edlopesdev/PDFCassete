@@ -7,8 +7,12 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.media.AudioAttributes
+import android.media.AudioFocusRequest
+import android.media.AudioManager
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
 import android.support.v4.media.MediaMetadataCompat
 import android.support.v4.media.session.MediaSessionCompat
 import android.support.v4.media.session.PlaybackStateCompat
@@ -17,11 +21,23 @@ import androidx.core.content.ContextCompat
 
 class AudioPlaybackService : Service() {
     private lateinit var mediaSession: MediaSessionCompat
+    private var wakeLock: PowerManager.WakeLock? = null
+    private var audioManager: AudioManager? = null
+    private var audioFocusRequest: AudioFocusRequest? = null
     private var title: String = ""
     private var isPlaying = false
 
     override fun onCreate() {
         super.onCreate()
+        val powerManager = getSystemService(POWER_SERVICE) as PowerManager
+        wakeLock = powerManager.newWakeLock(
+            PowerManager.PARTIAL_WAKE_LOCK,
+            "PDFCassete::AudioPlaybackWakeLock"
+        ).apply {
+            setReferenceCounted(false)
+        }
+        audioManager = getSystemService(AUDIO_SERVICE) as AudioManager
+
         mediaSession = MediaSessionCompat(this, "PDF Cassette").apply {
             setFlags(
                 MediaSessionCompat.FLAG_HANDLES_MEDIA_BUTTONS or
@@ -47,6 +63,7 @@ class AudioPlaybackService : Service() {
             ACTION_UPDATE -> {
                 title = intent.getStringExtra(EXTRA_TITLE) ?: title
                 isPlaying = intent.getBooleanExtra(EXTRA_IS_PLAYING, isPlaying)
+                updateWakeLockAndAudioFocus()
                 updateMediaSession()
                 startInForeground(buildNotification())
             }
@@ -54,11 +71,65 @@ class AudioPlaybackService : Service() {
                 title = intent?.getStringExtra(EXTRA_TITLE) ?: getString(R.string.app_name)
                 isPlaying = true
                 createNotificationChannel()
+                updateWakeLockAndAudioFocus()
                 updateMediaSession()
                 startInForeground(buildNotification())
             }
         }
         return START_NOT_STICKY
+    }
+
+    private fun updateWakeLockAndAudioFocus() {
+        if (isPlaying) {
+            if (wakeLock?.isHeld == false) {
+                wakeLock?.acquire(12 * 60 * 60 * 1000L)
+            }
+            requestAudioFocus()
+        } else {
+            if (wakeLock?.isHeld == true) {
+                wakeLock?.release()
+            }
+            abandonAudioFocus()
+        }
+    }
+
+    private fun requestAudioFocus() {
+        val am = audioManager ?: return
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            if (audioFocusRequest == null) {
+                val attrs = AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_MEDIA)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                    .build()
+                audioFocusRequest = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+                    .setAudioAttributes(attrs)
+                    .setAcceptsDelayedFocusGain(true)
+                    .setOnAudioFocusChangeListener { focusChange ->
+                        if (focusChange == AudioManager.AUDIOFOCUS_LOSS) {
+                            sendPlaybackCommand(ACTION_PAUSE)
+                        }
+                    }
+                    .build()
+            }
+            audioFocusRequest?.let { am.requestAudioFocus(it) }
+        } else {
+            @Suppress("DEPRECATION")
+            am.requestAudioFocus(
+                null,
+                AudioManager.STREAM_MUSIC,
+                AudioManager.AUDIOFOCUS_GAIN
+            )
+        }
+    }
+
+    private fun abandonAudioFocus() {
+        val am = audioManager ?: return
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            audioFocusRequest?.let { am.abandonAudioFocusRequest(it) }
+        } else {
+            @Suppress("DEPRECATION")
+            am.abandonAudioFocus(null)
+        }
     }
 
     private fun startInForeground(notification: android.app.Notification) {
@@ -166,6 +237,10 @@ class AudioPlaybackService : Service() {
     }
 
     override fun onDestroy() {
+        if (wakeLock?.isHeld == true) {
+            wakeLock?.release()
+        }
+        abandonAudioFocus()
         mediaSession.release()
         super.onDestroy()
     }
