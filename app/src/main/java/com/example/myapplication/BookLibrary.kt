@@ -18,6 +18,7 @@ import java.util.UUID
 import kotlin.math.min
 import kotlin.math.roundToInt
 
+/** Metadados, preferências e posição de reprodução persistidos para um PDF. */
 data class Book(
     val id: String,
     val fileName: String,
@@ -36,12 +37,17 @@ data class Book(
     val error: String = ""
 )
 
+// Estados possíveis do ciclo de vida de um documento na biblioteca.
 const val STATUS_PROCESSING = "processing"
 const val STATUS_READY = "ready"
 const val STATUS_NO_TEXT = "no_text"
 const val STATUS_ERROR = "error"
 const val STATUS_PENDING = "pending"
 
+/**
+ * Importa e processa PDFs, guarda os arquivos no espaço privado do app e persiste os metadados.
+ * O texto extraído é armazenado em arquivos por página para carregamento sob demanda.
+ */
 class BookLibrary(context: Context) {
     private val appContext = context.applicationContext
     private val root = File(appContext.filesDir, "cassette_books")
@@ -49,12 +55,15 @@ class BookLibrary(context: Context) {
         appContext.getSharedPreferences("cassette_library", Context.MODE_PRIVATE)
 
     init {
+        // Inicializa os recursos do PDFBox e prepara a pasta local da biblioteca.
         PDFBoxResourceLoader.init(appContext)
         if (!root.exists()) root.mkdirs()
     }
 
+    /** Lê os livros guardados nas preferências e reconstrói seus respectivos modelos. */
     fun all(): List<Book> = decodeBooks(preferences.getString(KEY_BOOKS, "[]") ?: "[]")
 
+    /** Copia e valida um PDF selecionado pelo provedor de documentos do Android. */
     fun importPdf(uri: Uri): Book {
         val id = UUID.randomUUID().toString()
         val bookDir = File(root, id)
@@ -103,6 +112,7 @@ class BookLibrary(context: Context) {
         }
     }
 
+    /** Obtém um nome legível do provedor, recorrendo à URI quando não há metadados. */
     private fun queryFileName(uri: Uri): String {
         var name: String? = null
         try {
@@ -141,6 +151,10 @@ class BookLibrary(context: Context) {
         return name
     }
 
+    /**
+     * Extrai metadados e texto página a página, determina se há texto narrável e gera a capa.
+     * Esta operação deve ser chamada fora da thread principal.
+     */
     fun process(book: Book): Book {
         val source = File(File(root, book.id), "source.pdf")
         val textDir = File(root, book.id)
@@ -174,12 +188,14 @@ class BookLibrary(context: Context) {
         return result
     }
 
+    /** Retorna o arquivo da capa, gerando-o se ainda não existir. */
     fun coverFile(bookId: String): File {
         val cover = File(File(root, bookId), COVER_FILE_NAME)
         if (!cover.isFile) renderCover(bookId)
         return cover
     }
 
+    /** Renderiza a primeira página do PDF para uma imagem usada na lista da biblioteca. */
     private fun renderCover(bookId: String) {
         val bookDir = File(root, bookId)
         val source = File(bookDir, "source.pdf")
@@ -224,23 +240,28 @@ class BookLibrary(context: Context) {
         }
     }
 
+    /** Lê o texto previamente extraído; o argumento da página começa em 1. */
     fun pageText(bookId: String, page: Int): String {
         if (page < 1) return ""
         val file = File(File(root, bookId), "page-$page.txt")
         return if (file.isFile) file.readText(StandardCharsets.UTF_8) else ""
     }
 
+    /** Atualiza ou insere o registo do livro nas preferências locais. */
     fun update(book: Book) = save(book)
 
+    /** Remove os arquivos do livro e seu registro da biblioteca. */
     fun delete(book: Book) {
         File(root, book.id).deleteRecursively()
         persist(all().filterNot { it.id == book.id })
     }
 
+    /** Substitui o registo do mesmo ID e grava a lista atualizada. */
     private fun save(book: Book) {
         persist(all().filterNot { it.id == book.id } + book)
     }
 
+    /** Serializa todos os campos dos livros em JSON nas SharedPreferences. */
     private fun persist(books: List<Book>) {
         val json = JSONArray()
         books.forEach { book ->
@@ -267,6 +288,7 @@ class BookLibrary(context: Context) {
         preferences.edit().putString(KEY_BOOKS, json.toString()).apply()
     }
 
+    /** Desserializa os registos e corrige nomes vazios/antigos com valores utilizáveis. */
     private fun decodeBooks(encoded: String): List<Book> {
         val json = JSONArray(encoded)
         return (0 until json.length()).map { index ->
@@ -300,6 +322,7 @@ class BookLibrary(context: Context) {
     }
 
     companion object {
+        // Limite de importação e nomes/chaves locais utilizados pelo armazenamento.
         const val MAX_FILE_BYTES = 100L * 1024 * 1024
         private const val KEY_BOOKS = "books"
         private const val COVER_FILE_NAME = "cover.png"

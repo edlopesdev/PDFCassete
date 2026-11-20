@@ -19,7 +19,12 @@ import android.support.v4.media.session.PlaybackStateCompat
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 
+/**
+ * Serviço em primeiro plano que mantém os controles de mídia disponíveis fora da Activity.
+ * A reprodução TTS continua na Activity; este serviço encaminha comandos e publica o estado.
+ */
 class AudioPlaybackService : Service() {
+    // Sessão e recursos de energia/áudio mantidos enquanto a leitura está ativa.
     private lateinit var mediaSession: MediaSessionCompat
     private var wakeLock: PowerManager.WakeLock? = null
     private var audioManager: AudioManager? = null
@@ -29,6 +34,7 @@ class AudioPlaybackService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        // Mantém a CPU ativa durante a narração e prepara o acesso ao foco de áudio.
         val powerManager = getSystemService(POWER_SERVICE) as PowerManager
         wakeLock = powerManager.newWakeLock(
             PowerManager.PARTIAL_WAKE_LOCK,
@@ -38,6 +44,7 @@ class AudioPlaybackService : Service() {
         }
         audioManager = getSystemService(AUDIO_SERVICE) as AudioManager
 
+        // Integra os botões do sistema (incluindo controles de mídia) com os comandos do app.
         mediaSession = MediaSessionCompat(this, "PDF Cassette").apply {
             setFlags(
                 MediaSessionCompat.FLAG_HANDLES_MEDIA_BUTTONS or
@@ -53,8 +60,10 @@ class AudioPlaybackService : Service() {
         }
     }
 
+    // Serviço iniciado, não vinculado diretamente por outros componentes.
     override fun onBind(intent: Intent?): IBinder? = null
 
+    /** Processa comandos recebidos e atualiza notificação, sessão e recursos de áudio. */
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_PLAY, ACTION_PAUSE, ACTION_NEXT, ACTION_PREVIOUS -> {
@@ -79,6 +88,7 @@ class AudioPlaybackService : Service() {
         return START_NOT_STICKY
     }
 
+    /** Adquire ou libera o wake lock e o foco conforme o estado de reprodução. */
     private fun updateWakeLockAndAudioFocus() {
         if (isPlaying) {
             if (wakeLock?.isHeld == false) {
@@ -93,6 +103,7 @@ class AudioPlaybackService : Service() {
         }
     }
 
+    /** Solicita foco de áudio usando a API disponível na versão atual do Android. */
     private fun requestAudioFocus() {
         val am = audioManager ?: return
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -122,6 +133,7 @@ class AudioPlaybackService : Service() {
         }
     }
 
+    /** Devolve ao sistema o foco de áudio previamente solicitado. */
     private fun abandonAudioFocus() {
         val am = audioManager ?: return
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -132,6 +144,7 @@ class AudioPlaybackService : Service() {
         }
     }
 
+    /** Inicia/atualiza o serviço em primeiro plano com o tipo de reprodução de mídia. */
     private fun startInForeground(notification: android.app.Notification) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(
@@ -144,6 +157,7 @@ class AudioPlaybackService : Service() {
         }
     }
 
+    /** Publica metadados do livro e ações/estado atuais para os controles do Android. */
     private fun updateMediaSession() {
         mediaSession.setMetadata(
             MediaMetadataCompat.Builder()
@@ -168,6 +182,7 @@ class AudioPlaybackService : Service() {
         )
     }
 
+    /** Cria a notificação persistente com atalhos para navegar e controlar a narração. */
     private fun buildNotification(): android.app.Notification {
         val openAppIntent = Intent(this, MainActivity::class.java)
         val contentPendingIntent = PendingIntent.getActivity(
@@ -207,6 +222,7 @@ class AudioPlaybackService : Service() {
             .build()
     }
 
+    /** Constrói um PendingIntent que entrega uma ação de mídia a este serviço. */
     private fun commandPendingIntent(action: String): PendingIntent {
         val intent = Intent(this, AudioPlaybackService::class.java).setAction(action)
         return PendingIntent.getService(
@@ -217,6 +233,7 @@ class AudioPlaybackService : Service() {
         )
     }
 
+    /** Encaminha uma ação da notificação/sessão à Activity por broadcast não exportado. */
     private fun sendPlaybackCommand(command: String) {
         sendBroadcast(
             Intent(ACTION_PLAYBACK_COMMAND)
@@ -225,6 +242,7 @@ class AudioPlaybackService : Service() {
         )
     }
 
+    /** Registra o canal de notificação exigido pelo Android 8 ou posterior. */
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
@@ -237,6 +255,7 @@ class AudioPlaybackService : Service() {
     }
 
     override fun onDestroy() {
+        // Libera todos os recursos mantidos pelo serviço antes de ser destruído.
         if (wakeLock?.isHeld == true) {
             wakeLock?.release()
         }
@@ -246,6 +265,7 @@ class AudioPlaybackService : Service() {
     }
 
     companion object {
+        // Ações e extras formam o contrato de comunicação entre Activity e serviço.
         const val ACTION_PLAYBACK_COMMAND = "com.example.myapplication.PLAYBACK_COMMAND"
         const val ACTION_PLAY = "com.example.myapplication.action.PLAY"
         const val ACTION_PAUSE = "com.example.myapplication.action.PAUSE"
@@ -259,12 +279,14 @@ class AudioPlaybackService : Service() {
         private const val EXTRA_TITLE = "title"
         private const val EXTRA_IS_PLAYING = "is_playing"
 
+        /** Inicia o serviço em primeiro plano para uma nova sessão de leitura. */
         fun start(context: Context, title: String) {
             val intent = Intent(context, AudioPlaybackService::class.java)
                 .putExtra(EXTRA_TITLE, title)
             ContextCompat.startForegroundService(context, intent)
         }
 
+        /** Atualiza título e estado do player sem criar outra sessão de serviço. */
         fun update(context: Context, title: String, isPlaying: Boolean) {
             val intent = Intent(context, AudioPlaybackService::class.java)
                 .setAction(ACTION_UPDATE)
@@ -273,6 +295,7 @@ class AudioPlaybackService : Service() {
             context.startService(intent)
         }
 
+        /** Encerra o serviço de reprodução. */
         fun stop(context: Context) {
             context.stopService(Intent(context, AudioPlaybackService::class.java))
         }

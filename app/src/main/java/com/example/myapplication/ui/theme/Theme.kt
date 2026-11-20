@@ -12,6 +12,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 
+/** Monta o tema Material 3 com as cores escolhidas nas configurações do app. */
 @Composable
 fun MyApplicationTheme(
     darkTheme: Boolean = isSystemInDarkTheme(),
@@ -22,6 +23,7 @@ fun MyApplicationTheme(
     textColor: Color = Color(0xFFF3F0EA),
     content: @Composable () -> Unit
 ) {
+    // Usa as cores dinâmicas do Android 12+ somente quando explicitamente habilitadas.
     val colorScheme = when {
         dynamicColor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> {
             val context = LocalContext.current

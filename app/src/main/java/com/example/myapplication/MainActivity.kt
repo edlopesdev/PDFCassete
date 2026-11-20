@@ -84,24 +84,31 @@ import kotlin.math.sin
 
 private const val KEY_LAST_BOOK_ID = "last_book_id"
 
+/** Texto de uma página já dividido em trechos e pronto para ser usado pelo player. */
 private data class PreparedPage(
     val bookId: String,
     val page: Int,
     val paragraphs: List<String>
 )
 
+/** Cores configuráveis da interface, convertidas para o tema do Compose. */
 private data class AppColors(
     val accent: Color,
     val background: Color,
     val text: Color
 )
 
+/**
+ * Activity que conecta o ciclo de vida do Android, o mecanismo TTS e a interface Compose.
+ * A lógica de telas e reprodução fica em [CassetteReadApp].
+ */
 class MainActivity : ComponentActivity() {
     private lateinit var speech: TextToSpeech
     private var onSpeechDone: ((String?) -> Unit)? = null
     private var onSpeechError: ((String?) -> Unit)? = null
     private var persistProgress: (() -> Unit)? = null
     private var onPlaybackCommand: ((String) -> Unit)? = null
+    // Recebe os comandos enviados pelos botões da notificação e os encaminha à interface.
     private val playbackCommandReceiver = object : android.content.BroadcastReceiver() {
         override fun onReceive(context: android.content.Context, intent: Intent) {
             intent.getStringExtra(AudioPlaybackService.EXTRA_COMMAND)?.let { command ->
@@ -114,6 +121,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        // O broadcast não é exportado: somente componentes deste aplicativo podem controlá-lo.
         ContextCompat.registerReceiver(
             this,
             playbackCommandReceiver,
@@ -122,6 +130,7 @@ class MainActivity : ComponentActivity() {
         )
         playbackCommandReceiverRegistered = true
 
+        // O TTS é assíncrono; esses estados atualizam a UI quando o mecanismo estiver pronto.
         var ready by mutableStateOf(false)
         var voices by mutableStateOf(emptyList<Voice>())
         speech = TextToSpeech(this) { result ->
@@ -134,6 +143,7 @@ class MainActivity : ComponentActivity() {
             }
 
         }
+        // O TTS chama os callbacks fora da UI; runOnUiThread permite atualizar o estado Compose.
         speech.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
             override fun onStart(utteranceId: String?) = Unit
 
@@ -151,8 +161,10 @@ class MainActivity : ComponentActivity() {
             }
         })
 
+        // As preferências guardam personalização visual independente dos dados dos livros.
         val settings = getSharedPreferences("cassette_settings", MODE_PRIVATE)
         setContent {
+            // Converte as cores persistidas em estado Compose para aplicar mudanças imediatamente.
             var accentArgb by remember {
                 mutableIntStateOf(settings.getInt(KEY_ACCENT_COLOR, DEFAULT_ACCENT_COLOR))
             }
@@ -204,11 +216,13 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onPause() {
+        // Salva a posição atual antes de a Activity deixar de estar visível.
         persistProgress?.invoke()
         super.onPause()
     }
 
     override fun onDestroy() {
+        // Desconecta callbacks e recursos do sistema para evitar referências após a Activity.
         onSpeechDone = null
         onSpeechError = null
         persistProgress = null
@@ -226,6 +240,7 @@ class MainActivity : ComponentActivity() {
     }
 
     companion object {
+        // Chaves e paleta inicial usadas para persistir as cores escolhidas.
         private const val KEY_ACCENT_COLOR = "accent_color"
         private const val KEY_BACKGROUND_COLOR = "background_color"
         private const val KEY_TEXT_COLOR = "text_color"
@@ -251,10 +266,12 @@ private fun CassetteReadApp(
     stopPlaybackService: () -> Unit,
     setPlaybackCommandListener: ((String) -> Unit) -> Unit
 ) {
+    // Reúne estado da tela, ações de reprodução e navegação entre player, biblioteca e ajustes.
     val context = LocalContext.current
     val preferences = remember(context) {
         context.getSharedPreferences("cassette_settings", Context.MODE_PRIVATE)
     }
+    // Estado de domínio e navegação: a seleção inicial prioriza o último livro ouvido.
     var books by remember { mutableStateOf(library.all()) }
     var selectedId by remember {
         val savedId = preferences.getString(KEY_LAST_BOOK_ID, null)
@@ -274,6 +291,7 @@ private fun CassetteReadApp(
         context.assets.open("log.txt").bufferedReader().use { it.readText() }
     }
     var hasUnreadLog by remember { mutableStateOf(true) }
+    // Estado do player e preferências temporárias da sessão de leitura.
     var isPlaying by remember { mutableStateOf(false) }
     var isLoading by remember { mutableStateOf(false) }
     var playbackServiceStarted by remember { mutableStateOf(false) }
@@ -301,6 +319,7 @@ private fun CassetteReadApp(
     var renameBook by remember { mutableStateOf<Book?>(null) }
     var renameValue by remember { mutableStateOf("") }
     val scope = rememberCoroutineScope()
+    // Atualiza o registro opcional e recarrega a lista persistida da biblioteca.
     fun refresh(updated: Book? = null) {
         if (updated != null) library.update(updated)
         books = library.all()
@@ -313,6 +332,7 @@ private fun CassetteReadApp(
         }.apply()
     }
 
+    // Persiste posição e velocidade para retomar o documento posteriormente.
     fun saveProgress(page: Int = currentPage, paragraph: Int = currentParagraph) {
         val book = books.firstOrNull { it.id == selectedId } ?: return
         val updated = book.copy(
@@ -325,6 +345,7 @@ private fun CassetteReadApp(
         refresh(updated)
     }
 
+    // Encerra por completo o serviço; usado quando a sessão de reprodução termina.
     fun stopForegroundPlayback() {
         stopPlaybackService()
         playbackServiceStarted = false
@@ -336,6 +357,7 @@ private fun CassetteReadApp(
         }
     }
 
+    // Para o TTS e sincroniza o estado do player/serviço, opcionalmente voltando ao início.
     fun stopPlayback(reset: Boolean = false) {
         isPlaying = false
         activeUtteranceId = null
@@ -350,6 +372,7 @@ private fun CassetteReadApp(
         }
     }
 
+    // Configura TTS e serviço de mídia, registra a posição e inicia um trecho identificado.
     fun speakText(text: String, page: Int, paragraph: Int) {
         val book = books.firstOrNull { it.id == selectedId } ?: return
         rememberBook(book.id)
@@ -383,6 +406,7 @@ private fun CassetteReadApp(
         }
     }
 
+    // Carrega texto em background, ignora páginas sem texto e opcionalmente inicia a fala.
     fun loadAndSpeak(page: Int, paragraph: Int, shouldSpeak: Boolean) {
         val book = books.firstOrNull { it.id == selectedId } ?: return
         scope.launch {
@@ -449,6 +473,7 @@ private fun CassetteReadApp(
         }
     }
 
+    // Valida se o livro e o TTS estão prontos antes de começar ou retomar a leitura.
     fun playOrResume() {
         val book = selectedBook ?: return
         if (!ttsReady) {
@@ -478,6 +503,7 @@ private fun CassetteReadApp(
         }
     }
 
+    // Muda a posição da leitura e preserva se a navegação deve continuar falando.
     fun navigate(page: Int, paragraph: Int) {
         val resumeAfterNavigation = isPlaying
         isPlaying = false
@@ -487,6 +513,7 @@ private fun CassetteReadApp(
         loadAndSpeak(page, paragraph, resumeAfterNavigation)
     }
 
+    // Ao terminar um trecho, fala o próximo ou carrega a página seguinte.
     setDoneListener { utteranceId ->
         if (isPlaying && utteranceId == activeUtteranceId) {
             activeUtteranceId = null
@@ -498,6 +525,7 @@ private fun CassetteReadApp(
             }
         }
     }
+    // Em falha de síntese, pausa o serviço, guarda o progresso e informa a pessoa usuária.
     setErrorListener { utteranceId ->
         if (utteranceId == activeUtteranceId) {
             activeUtteranceId = null
@@ -532,6 +560,7 @@ private fun CassetteReadApp(
         }
     }
 
+    // Carrega o texto da página selecionada fora da thread principal.
     LaunchedEffect(selectedId, currentPage) {
         val book = books.firstOrNull { it.id == selectedId }
         paragraphs = if (book?.status == STATUS_READY) {
@@ -543,6 +572,7 @@ private fun CassetteReadApp(
         }
     }
 
+    // Prepara antecipadamente a próxima página que contenha texto, se houver.
     LaunchedEffect(selectedId, currentPage, selectedBook?.status, selectedBook?.pageCount) {
         val book = selectedBook
         prefetchedPage = null
@@ -564,6 +594,7 @@ private fun CassetteReadApp(
         }
     }
 
+    // Atualiza periodicamente o progresso durante a narração.
     LaunchedEffect(isPlaying, selectedId) {
         while (isPlaying) {
             delay(15_000)
@@ -571,6 +602,7 @@ private fun CassetteReadApp(
         }
     }
 
+    // O temporizador pausa a reprodução quando o prazo definido é atingido.
     LaunchedEffect(sleepDeadline, isPlaying) {
         val deadline = sleepDeadline
         if (deadline != null && isPlaying) {
@@ -584,6 +616,7 @@ private fun CassetteReadApp(
         }
     }
 
+    // Se o app foi interrompido durante o processamento, permite processar o livro de novo.
     LaunchedEffect(Unit) {
         val interrupted = books.filter { it.status == STATUS_PROCESSING }
         if (interrupted.isNotEmpty()) {
@@ -599,6 +632,7 @@ private fun CassetteReadApp(
         }
     }
 
+    // Abre o seletor de documentos para importar vários PDFs escolhidos pela pessoa usuária.
     val importLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenMultipleDocuments()
     ) { uris ->
@@ -632,6 +666,7 @@ private fun CassetteReadApp(
         }
     }
 
+    // Conteúdo visual principal: cabeçalho e uma das telas de ajustes, biblioteca ou player.
     Surface(
         modifier = Modifier.fillMaxSize(),
         color = MaterialTheme.colorScheme.background
@@ -779,6 +814,7 @@ private fun CassetteReadApp(
                 }
             }
 
+            // Atalho flutuante que abre o texto informativo incluído nos assets do app.
             Box(
                 modifier = Modifier
                     .align(Alignment.BottomEnd)
@@ -850,6 +886,7 @@ private fun CassetteReadApp(
         }
     }
 
+    // Diálogos independentes da tela principal para voz, temporizador e renomeação.
     if (showVoiceOptions) {
         SelectionDialog(
             title = "Vozes disponíveis no dispositivo",
@@ -947,6 +984,7 @@ private fun Header(
     onSettings: () -> Unit,
     onImport: () -> Unit
 ) {
+    // Cabeçalho comum às telas, com ações para importar PDF, abrir a biblioteca e ajustar cores.
     Column(modifier = Modifier.fillMaxWidth()) {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -999,6 +1037,7 @@ private fun SettingsScreen(
     onColorsChanged: (AppColors) -> Unit,
     onBack: () -> Unit
 ) {
+    // Opções predefinidas de destaque, fundo e texto disponíveis na personalização.
     val accentOptions = listOf(
         ColorChoice(stringResource(R.string.color_orange), Color(0xFFFF9A56)),
         ColorChoice(stringResource(R.string.color_blue), Color(0xFF64B5F6)),
@@ -1063,6 +1102,7 @@ private fun ColorSettingsRow(
     selected: Color,
     onSelect: (Color) -> Unit
 ) {
+    // Exibe uma categoria de cores e destaca visualmente a opção selecionada.
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text(label, fontWeight = FontWeight.SemiBold)
         Row(
@@ -1105,6 +1145,7 @@ private fun ColorSettingsRow(
 
 @Composable
 private fun EmptyLibrary(onImport: () -> Unit) {
+    // Estado inicial da biblioteca com uma ação direta para importar o primeiro PDF.
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
         shape = RoundedCornerShape(24.dp),
@@ -1147,6 +1188,7 @@ private fun PlayerScreen(
     onTimer: () -> Unit,
     onVoiceMenu: () -> Unit
 ) {
+    // Player: status, capa ilustrada, posição do documento e controles de áudio.
     var menuRate by remember { mutableStateOf(false) }
     var seekPage by remember(page) { mutableFloatStateOf(page.toFloat()) }
     Column(
@@ -1330,6 +1372,7 @@ private fun LibraryScreen(
     onDelete: (Book) -> Unit,
     onProcess: (Book) -> Unit
 ) {
+    // Biblioteca com pesquisa, ordenação e ações por documento.
     Column(modifier = Modifier.fillMaxWidth()) {
         Text("Sua biblioteca", fontSize = 24.sp, fontWeight = FontWeight.SemiBold)
         Spacer(Modifier.height(10.dp))
@@ -1417,6 +1460,7 @@ private fun LibraryScreen(
 
 @Composable
 private fun BookCover(book: Book, library: BookLibrary) {
+    // Decodifica a capa fora da thread principal e mostra um substituto se ela não estiver disponível.
     var bitmap by remember(book.id) {
         mutableStateOf<androidx.compose.ui.graphics.ImageBitmap?>(null)
     }
@@ -1466,6 +1510,7 @@ private fun CassetteIllustration(
     completed: Boolean,
     modifier: Modifier = Modifier
 ) {
+    // Ilustração vetorial em Canvas; os carretéis giram enquanto a leitura está ativa.
     var angle by remember { mutableFloatStateOf(0f) }
     val accentColor = MaterialTheme.colorScheme.primary
     val completionColor = MaterialTheme.colorScheme.secondary
@@ -1562,6 +1607,7 @@ private fun <T : Any> SelectionDialog(
     onPreview: ((T) -> Unit)? = null,
     footer: String? = null
 ) {
+    // Diálogo genérico para selecionar um valor e, quando solicitado, pré-visualizá-lo.
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(title) },
@@ -1588,6 +1634,7 @@ private fun <T : Any> SelectionDialog(
 }
 
 private fun splitForSpeech(text: String): List<String> {
+    // Junta quebras simples, preserva parágrafos e limita o tamanho aceito em cada fala do TTS.
     val paragraphs = text
         .replace(Regex("[\\t\\u00A0]+"), " ")
         .replace(Regex("(?<=\\p{L})-\\n\\s*(?=\\p{Ll})"), "")
@@ -1620,6 +1667,7 @@ private fun splitForSpeech(text: String): List<String> {
     }
 }
 
+/** Traduz o estado interno do processamento para um rótulo curto na biblioteca. */
 private fun bookStatus(book: Book): String = when (book.status) {
     STATUS_PROCESSING -> "processando"
     STATUS_PENDING -> "pendente"
@@ -1629,6 +1677,7 @@ private fun bookStatus(book: Book): String = when (book.status) {
     else -> book.status
 }
 
+/** Formata o tamanho do PDF em KB ou MB para exibição. */
 private fun formatBytes(bytes: Long): String =
     if (bytes < 1024 * 1024) "${(bytes / 1024f).toInt()} KB"
     else String.format(Locale.getDefault(), "%.1f MB", bytes / (1024f * 1024f))
