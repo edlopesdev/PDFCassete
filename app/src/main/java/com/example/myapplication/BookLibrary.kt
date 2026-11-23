@@ -28,6 +28,7 @@ data class Book(
     val sizeBytes: Long,
     val importedAt: Long,
     val lastPlayedAt: Long = 0,
+    val playedTimeMillis: Long = 0,
     val currentPage: Int = 0,
     val currentParagraph: Int = 0,
     val completed: Boolean = false,
@@ -275,6 +276,7 @@ class BookLibrary(context: Context) {
                     put("sizeBytes", book.sizeBytes)
                     put("importedAt", book.importedAt)
                     put("lastPlayedAt", book.lastPlayedAt)
+                    put("playedTimeMillis", book.playedTimeMillis)
                     put("currentPage", book.currentPage)
                     put("currentParagraph", book.currentParagraph)
                     put("completed", book.completed)
@@ -310,6 +312,7 @@ class BookLibrary(context: Context) {
                 sizeBytes = item.optLong("sizeBytes"),
                 importedAt = item.optLong("importedAt"),
                 lastPlayedAt = item.optLong("lastPlayedAt"),
+                playedTimeMillis = item.optLong("playedTimeMillis"),
                 currentPage = item.optInt("currentPage"),
                 currentParagraph = item.optInt("currentParagraph"),
                 completed = item.optBoolean("completed"),

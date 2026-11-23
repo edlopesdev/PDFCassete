@@ -7,6 +7,8 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.media.AudioAttributes
 import android.media.AudioFocusRequest
 import android.media.AudioManager
@@ -30,6 +32,7 @@ class AudioPlaybackService : Service() {
     private var audioManager: AudioManager? = null
     private var audioFocusRequest: AudioFocusRequest? = null
     private var title: String = ""
+    private var coverPath: String = ""
     private var isPlaying = false
 
     override fun onCreate() {
@@ -71,6 +74,7 @@ class AudioPlaybackService : Service() {
             }
             ACTION_UPDATE -> {
                 title = intent.getStringExtra(EXTRA_TITLE) ?: title
+                coverPath = intent.getStringExtra(EXTRA_COVER_PATH) ?: coverPath
                 isPlaying = intent.getBooleanExtra(EXTRA_IS_PLAYING, isPlaying)
                 updateWakeLockAndAudioFocus()
                 updateMediaSession()
@@ -78,6 +82,7 @@ class AudioPlaybackService : Service() {
             }
             else -> {
                 title = intent?.getStringExtra(EXTRA_TITLE) ?: getString(R.string.app_name)
+                coverPath = intent?.getStringExtra(EXTRA_COVER_PATH) ?: ""
                 isPlaying = true
                 createNotificationChannel()
                 updateWakeLockAndAudioFocus()
@@ -159,10 +164,17 @@ class AudioPlaybackService : Service() {
 
     /** Publica metadados do livro e ações/estado atuais para os controles do Android. */
     private fun updateMediaSession() {
+        val cover = loadCoverBitmap()
         mediaSession.setMetadata(
             MediaMetadataCompat.Builder()
                 .putString(MediaMetadataCompat.METADATA_KEY_TITLE, title)
                 .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, getString(R.string.app_name))
+                .apply {
+                    cover?.let {
+                        putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, it)
+                        putBitmap(MediaMetadataCompat.METADATA_KEY_DISPLAY_ICON, it)
+                    }
+                }
                 .build()
         )
         val actions = PlaybackStateCompat.ACTION_PLAY or
@@ -191,10 +203,20 @@ class AudioPlaybackService : Service() {
             openAppIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
+        val cover = loadCoverBitmap()
+        val notificationColor = cover?.let(::extractNotificationColor)
+            ?: ContextCompat.getColor(this, R.color.notification_accent)
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_media_play)
             .setContentTitle(title)
             .setContentText(getString(R.string.reading_notification_text))
+            .apply {
+                cover?.let { setLargeIcon(it) }
+                notificationColor.let {
+                    setColor(it)
+                    setColorized(true)
+                }
+            }
             .setContentIntent(contentPendingIntent)
             .setCategory(NotificationCompat.CATEGORY_TRANSPORT)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
@@ -242,6 +264,70 @@ class AudioPlaybackService : Service() {
         )
     }
 
+    private fun loadCoverBitmap(): Bitmap? {
+        if (coverPath.isBlank()) return null
+        return try {
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeFile(coverPath, bounds)
+            val maxSide = 720
+            val largestSide = maxOf(bounds.outWidth, bounds.outHeight)
+            val sampleSize = if (largestSide > maxSide) {
+                maxOf(1, Integer.highestOneBit(largestSide / maxSide))
+            } else {
+                1
+            }
+            BitmapFactory.decodeFile(
+                coverPath,
+                BitmapFactory.Options().apply { inSampleSize = sampleSize }
+            )
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun extractNotificationColor(bitmap: Bitmap): Int {
+        val buckets = LinkedHashMap<Int, Int>()
+        val strideX = (bitmap.width / 32).coerceAtLeast(1)
+        val strideY = (bitmap.height / 32).coerceAtLeast(1)
+
+        var y = 0
+        while (y < bitmap.height) {
+            var x = 0
+            while (x < bitmap.width) {
+                val pixel = bitmap.getPixel(x, y)
+                val red = (pixel shr 16) and 0xff
+                val green = (pixel shr 8) and 0xff
+                val blue = pixel and 0xff
+                val alpha = (pixel ushr 24) and 0xff
+                val max = maxOf(red, green, blue)
+                val min = minOf(red, green, blue)
+                val saturation = if (max == 0) 0f else (max - min).toFloat() / max
+                val luminance = (red * 299 + green * 587 + blue * 114) / 1000
+
+                if (alpha >= 180 && luminance in 24..230 && saturation >= 0.12f) {
+                    val bucket = ((red / 32) shl 16) or ((green / 32) shl 8) or (blue / 32)
+                    buckets[bucket] = buckets.getOrDefault(bucket, 0) + 1
+                }
+                x += strideX
+            }
+            y += strideY
+        }
+
+        val dominantBucket = buckets.maxWithOrNull(
+            compareBy<Map.Entry<Int, Int>> { it.value }
+        )?.key
+
+        if (dominantBucket != null) {
+            val red = (((dominantBucket shr 16) and 0xff) * 32 + 16).coerceIn(0, 255)
+            val green = (((dominantBucket shr 8) and 0xff) * 32 + 16).coerceIn(0, 255)
+            val blue = ((dominantBucket and 0xff) * 32 + 16).coerceIn(0, 255)
+            return (0xff shl 24) or (red shl 16) or (green shl 8) or blue
+        }
+
+        val fallback = bitmap.getPixel(bitmap.width / 2, bitmap.height / 2)
+        return 0xff000000.toInt() or (fallback and 0x00ffffff)
+    }
+
     /** Registra o canal de notificação exigido pelo Android 8 ou posterior. */
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -277,20 +363,23 @@ class AudioPlaybackService : Service() {
         private const val CHANNEL_ID = "audio_playback"
         private const val NOTIFICATION_ID = 1
         private const val EXTRA_TITLE = "title"
+        private const val EXTRA_COVER_PATH = "cover_path"
         private const val EXTRA_IS_PLAYING = "is_playing"
 
         /** Inicia o serviço em primeiro plano para uma nova sessão de leitura. */
-        fun start(context: Context, title: String) {
+        fun start(context: Context, title: String, coverPath: String) {
             val intent = Intent(context, AudioPlaybackService::class.java)
                 .putExtra(EXTRA_TITLE, title)
+                .putExtra(EXTRA_COVER_PATH, coverPath)
             ContextCompat.startForegroundService(context, intent)
         }
 
         /** Atualiza título e estado do player sem criar outra sessão de serviço. */
-        fun update(context: Context, title: String, isPlaying: Boolean) {
+        fun update(context: Context, title: String, isPlaying: Boolean, coverPath: String) {
             val intent = Intent(context, AudioPlaybackService::class.java)
                 .setAction(ACTION_UPDATE)
                 .putExtra(EXTRA_TITLE, title)
+                .putExtra(EXTRA_COVER_PATH, coverPath)
                 .putExtra(EXTRA_IS_PLAYING, isPlaying)
             context.startService(intent)
         }

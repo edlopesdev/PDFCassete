@@ -1,7 +1,9 @@
 package com.example.myapplication
 
-import android.net.Uri
 import android.content.Context
+import androidx.core.content.edit
+import kotlin.time.Duration.Companion.seconds
+import kotlin.time.Duration.Companion.milliseconds
 import android.content.Intent
 import android.content.IntentFilter
 import android.graphics.BitmapFactory
@@ -110,7 +112,7 @@ class MainActivity : ComponentActivity() {
     private var onPlaybackCommand: ((String) -> Unit)? = null
     // Recebe os comandos enviados pelos botões da notificação e os encaminha à interface.
     private val playbackCommandReceiver = object : android.content.BroadcastReceiver() {
-        override fun onReceive(context: android.content.Context, intent: Intent) {
+        override fun onReceive(context: Context, intent: Intent) {
             intent.getStringExtra(AudioPlaybackService.EXTRA_COMMAND)?.let { command ->
                 onPlaybackCommand?.invoke(command)
             }
@@ -136,7 +138,7 @@ class MainActivity : ComponentActivity() {
         speech = TextToSpeech(this) { result ->
             if (result == TextToSpeech.SUCCESS) {
                 ready = true
-                speech.setLanguage(Locale.forLanguageTag("pt-BR"))
+                speech.language = Locale.forLanguageTag("pt-BR")
                 voices = speech.voices.orEmpty()
                     .filter { it.locale != null }
                     .sortedWith(compareBy<Voice>({ it.locale.displayName }, { it.name }))
@@ -192,11 +194,11 @@ class MainActivity : ComponentActivity() {
                         accentArgb = colors.accent.toArgb()
                         backgroundArgb = colors.background.toArgb()
                         textArgb = colors.text.toArgb()
-                        settings.edit()
-                            .putInt(KEY_ACCENT_COLOR, accentArgb)
-                            .putInt(KEY_BACKGROUND_COLOR, backgroundArgb)
-                            .putInt(KEY_TEXT_COLOR, textArgb)
-                            .apply()
+                        settings.edit {
+                            putInt(KEY_ACCENT_COLOR, accentArgb)
+                            putInt(KEY_BACKGROUND_COLOR, backgroundArgb)
+                            putInt(KEY_TEXT_COLOR, textArgb)
+                        }
                     },
                     speech = speech,
                     ttsReady = ready,
@@ -204,9 +206,11 @@ class MainActivity : ComponentActivity() {
                     setDoneListener = { onSpeechDone = it },
                     setErrorListener = { onSpeechError = it },
                     setPersistListener = { persistProgress = it },
-                    startPlaybackService = { title -> AudioPlaybackService.start(this, title) },
-                    updatePlaybackService = { title, playing ->
-                        AudioPlaybackService.update(this, title, playing)
+                    startPlaybackService = { title, coverPath ->
+                        AudioPlaybackService.start(this, title, coverPath)
+                    },
+                    updatePlaybackService = { title, playing, coverPath ->
+                        AudioPlaybackService.update(this, title, playing, coverPath)
                     },
                     stopPlaybackService = { AudioPlaybackService.stop(this) },
                     setPlaybackCommandListener = { onPlaybackCommand = it }
@@ -261,8 +265,8 @@ private fun CassetteReadApp(
     setDoneListener: ((String?) -> Unit) -> Unit,
     setErrorListener: ((String?) -> Unit) -> Unit,
     setPersistListener: (() -> Unit) -> Unit,
-    startPlaybackService: (String) -> Unit,
-    updatePlaybackService: (String, Boolean) -> Unit,
+    startPlaybackService: (String, String) -> Unit,
+    updatePlaybackService: (String, Boolean, String) -> Unit,
     stopPlaybackService: () -> Unit,
     setPlaybackCommandListener: ((String) -> Unit) -> Unit
 ) {
@@ -305,6 +309,8 @@ private fun CassetteReadApp(
     var paragraphs by remember(selectedId, currentPage) { mutableStateOf(emptyList<String>()) }
     var prefetchedPage by remember { mutableStateOf<PreparedPage?>(null) }
     var activeUtteranceId by remember { mutableStateOf<String?>(null) }
+    var playbackSessionStartedAt by remember { mutableStateOf<Long?>(null) }
+    var livePlayedTimeMillis by remember { mutableStateOf(0L) }
     var rate by remember(selectedId) {
         mutableFloatStateOf(selectedBook?.speechRate ?: 1f)
     }
@@ -321,15 +327,25 @@ private fun CassetteReadApp(
     val scope = rememberCoroutineScope()
     // Atualiza o registro opcional e recarrega a lista persistida da biblioteca.
     fun refresh(updated: Book? = null) {
-        if (updated != null) library.update(updated)
+        updated?.let { library.update(it) }
         books = library.all()
     }
 
     fun rememberBook(bookId: String?) {
-        preferences.edit().apply {
+        preferences.edit {
             if (bookId == null) remove(KEY_LAST_BOOK_ID)
             else putString(KEY_LAST_BOOK_ID, bookId)
-        }.apply()
+        }
+    }
+
+    fun commitPlayedTime() {
+        val startedAt = playbackSessionStartedAt ?: return
+        val elapsed = (System.currentTimeMillis() - startedAt).coerceAtLeast(0L)
+        playbackSessionStartedAt = System.currentTimeMillis()
+        livePlayedTimeMillis = 0L
+        if (elapsed <= 0L) return
+        val book = books.firstOrNull { it.id == selectedId } ?: return
+        refresh(book.copy(playedTimeMillis = book.playedTimeMillis + elapsed))
     }
 
     // Persiste posição e velocidade para retomar o documento posteriormente.
@@ -353,7 +369,9 @@ private fun CassetteReadApp(
 
     fun pauseForegroundPlayback() {
         if (playbackServiceStarted) {
-            updatePlaybackService(selectedBook?.title ?: "", false)
+            val book = selectedBook
+            val coverPath = book?.let { library.coverFile(it.id).absolutePath }.orEmpty()
+            updatePlaybackService(book?.title ?: "", false, coverPath)
         }
     }
 
@@ -362,6 +380,9 @@ private fun CassetteReadApp(
         isPlaying = false
         activeUtteranceId = null
         speech.stop()
+        commitPlayedTime()
+        playbackSessionStartedAt = null
+        livePlayedTimeMillis = 0L
         if (reset) stopForegroundPlayback() else pauseForegroundPlayback()
         if (reset) {
             currentPage = 0
@@ -379,11 +400,15 @@ private fun CassetteReadApp(
         currentPage = page
         currentParagraph = paragraph
         isPlaying = true
+        if (playbackSessionStartedAt == null) {
+            playbackSessionStartedAt = System.currentTimeMillis()
+            livePlayedTimeMillis = 0L
+        }
         if (!playbackServiceStarted) {
-            startPlaybackService(book.title)
+            startPlaybackService(book.title, library.coverFile(book.id).absolutePath)
             playbackServiceStarted = true
         }
-        updatePlaybackService(book.title, true)
+        updatePlaybackService(book.title, true, library.coverFile(book.id).absolutePath)
         val voice = voices.firstOrNull { it.name == book.voiceName }
         if (voice != null) speech.voice = voice
         speech.setSpeechRate(rate)
@@ -431,6 +456,9 @@ private fun CassetteReadApp(
                 }
                 if (foundParagraphs.isEmpty()) {
                     isPlaying = false
+                    commitPlayedTime()
+                    playbackSessionStartedAt = null
+                    livePlayedTimeMillis = 0L
                     stopForegroundPlayback()
                     isLoading = false
                     activeUtteranceId = null
@@ -509,6 +537,9 @@ private fun CassetteReadApp(
         isPlaying = false
         activeUtteranceId = null
         speech.stop()
+        commitPlayedTime()
+        playbackSessionStartedAt = null
+        livePlayedTimeMillis = 0L
         if (!resumeAfterNavigation) stopForegroundPlayback()
         loadAndSpeak(page, paragraph, resumeAfterNavigation)
     }
@@ -530,6 +561,9 @@ private fun CassetteReadApp(
         if (utteranceId == activeUtteranceId) {
             activeUtteranceId = null
             isPlaying = false
+            commitPlayedTime()
+            playbackSessionStartedAt = null
+            livePlayedTimeMillis = 0L
             stopForegroundPlayback()
             message = "A narração foi interrompida. Verifique se há uma voz disponível no dispositivo."
             saveProgress()
@@ -597,8 +631,16 @@ private fun CassetteReadApp(
     // Atualiza periodicamente o progresso durante a narração.
     LaunchedEffect(isPlaying, selectedId) {
         while (isPlaying) {
-            delay(15_000)
-            if (isPlaying) saveProgress()
+            delay(1.seconds)
+            if (isPlaying) {
+                val startedAt = playbackSessionStartedAt
+                livePlayedTimeMillis =
+                    if (startedAt == null) 0L
+                    else (System.currentTimeMillis() - startedAt).coerceAtLeast(0L)
+                if (livePlayedTimeMillis >= 15.seconds.inWholeMilliseconds) {
+                    commitPlayedTime()
+                }
+            }
         }
     }
 
@@ -606,7 +648,7 @@ private fun CassetteReadApp(
     LaunchedEffect(sleepDeadline, isPlaying) {
         val deadline = sleepDeadline
         if (deadline != null && isPlaying) {
-            delay((deadline - System.currentTimeMillis()).coerceAtLeast(0L))
+            delay(((deadline - System.currentTimeMillis()).coerceAtLeast(0L)).milliseconds)
             if (isPlaying) {
                 stopPlayback()
                 sleepMinutes = 0
@@ -705,6 +747,7 @@ private fun CassetteReadApp(
                 LibraryScreen(
                     library = library,
                     books = books,
+                    livePlayedTimeMillis = if (isPlaying) livePlayedTimeMillis else 0L,
                     selectedId = selectedId,
                     search = search,
                     sortByName = sortByName,
@@ -756,6 +799,7 @@ private fun CassetteReadApp(
             } else if (selectedBook != null) {
                 PlayerScreen(
                     book = selectedBook,
+                    livePlayedTimeMillis = if (isPlaying) livePlayedTimeMillis else 0L,
                     page = currentPage,
                     pageCount = selectedBook.pageCount,
                     paragraphCount = paragraphs.size,
@@ -896,9 +940,8 @@ private fun CassetteReadApp(
             onDismiss = { showVoiceOptions = false },
             onSelect = { value ->
                 showVoiceOptions = false
-                val voice = value as Voice
-                speech.voice = voice
-                selectedBook?.let { refresh(it.copy(voiceName = voice.name)) }
+                speech.voice = value
+                selectedBook?.let { refresh(it.copy(voiceName = value.name)) }
                 if (isPlaying) {
                     stopPlayback()
                     playOrResume()
@@ -1166,6 +1209,7 @@ private fun EmptyLibrary(onImport: () -> Unit) {
 @Composable
 private fun PlayerScreen(
     book: Book,
+    livePlayedTimeMillis: Long,
     page: Int,
     pageCount: Int,
     paragraphCount: Int,
@@ -1223,6 +1267,12 @@ private fun PlayerScreen(
             maxLines = 1,
             overflow = TextOverflow.Ellipsis
         )
+        Text(
+            "Tempo reproduzido: ${formatDuration(book.playedTimeMillis + livePlayedTimeMillis)}",
+            color = MaterialTheme.colorScheme.primary,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.Medium
+        )
         Spacer(Modifier.height(16.dp))
         CassetteIllustration(
             isPlaying = isPlaying,
@@ -1254,7 +1304,7 @@ private fun PlayerScreen(
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
                     fontSize = 11.sp
                 )
-                val percent = if (book.completed) 100 else if (pageCount > 0) (((seekPage.coerceIn(0f, (pageCount - 1).toFloat()) + 1f) / pageCount.toFloat()) * 100f).toInt().coerceIn(0, 100) else 0
+                val percent = if (book.completed) 100 else (((seekPage.coerceIn(0f, (pageCount - 1).toFloat()) + 1f) / pageCount.toFloat()) * 100f).toInt().coerceIn(0, 100)
                 Text(
                     "$percent%",
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
@@ -1362,6 +1412,7 @@ private fun PlayerScreen(
 private fun LibraryScreen(
     library: BookLibrary,
     books: List<Book>,
+    livePlayedTimeMillis: Long,
     selectedId: String?,
     search: String,
     sortByName: Boolean,
@@ -1427,6 +1478,16 @@ private fun LibraryScreen(
                             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.72f),
                             fontSize = 12.sp
                         )
+                        Text(
+                            "Ouvido: ${
+                                formatDuration(
+                                    book.playedTimeMillis +
+                                        if (book.id == selectedId) livePlayedTimeMillis else 0L
+                                )
+                            }",
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.72f),
+                            fontSize = 12.sp
+                        )
                         if (book.lastPlayedAt > 0 || book.completed) {
                             Text(
                                 if (book.completed) "Concluído" else "Retomar na página ${book.currentPage + 1}",
@@ -1454,6 +1515,21 @@ private fun LibraryScreen(
                     }
                 }
             }
+        }
+        if (filtered.isNotEmpty()) {
+            Spacer(Modifier.height(12.dp))
+            val totalPlayedMillis = books.sumOf { book ->
+                book.playedTimeMillis +
+                    if (book.id == selectedId) livePlayedTimeMillis else 0L
+            }
+            Text(
+                "Você passou ${formatDuration(totalPlayedMillis)} ficando mais inteligente!",
+                color = MaterialTheme.colorScheme.primary,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.fillMaxWidth(),
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center
+            )
         }
     }
 }
@@ -1681,3 +1757,11 @@ private fun bookStatus(book: Book): String = when (book.status) {
 private fun formatBytes(bytes: Long): String =
     if (bytes < 1024 * 1024) "${(bytes / 1024f).toInt()} KB"
     else String.format(Locale.getDefault(), "%.1f MB", bytes / (1024f * 1024f))
+
+private fun formatDuration(milliseconds: Long): String {
+    val totalSeconds = (milliseconds / 1000L).coerceAtLeast(0L)
+    val hours = totalSeconds / 3600L
+    val minutes = (totalSeconds % 3600L) / 60L
+    val seconds = totalSeconds % 60L
+    return "${hours}h${minutes}m${seconds}s"
+}
